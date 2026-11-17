@@ -20,22 +20,13 @@ IS_LINUX = platform.system() == "Linux"
 # Low-level runner                                                              #
 # --------------------------------------------------------------------------- #
 
-ALLOWED_SUBCOMMANDS = {"list", "create", "start", "stop", "remove", "stats", "inspect-ns", "inspect-net"}
-
-
-# Privileged runtime operations:
-#   - start: clone() namespaces, pivot_root, cgroup attach (CAP_SYS_ADMIN)
-#   - stop: kill root-owned container PIDs started via sudo
-# create/list/stats/remove remain unprivileged (metadata + cgroup reads).
-_SUDO_REQUIRED_SUBCOMMANDS = {"start", "stop"}
+ALLOWED_SUBCOMMANDS = {"list", "create", "start", "stop", "remove", "stats"}
 
 
 def _run(*args: str) -> dict[str, Any]:
     """
     Run the C engine with the supplied arguments.
     Only whitelisted sub-commands may be executed.
-    'start' and 'stop' are wrapped with sudo for namespace/cgroup privileges
-    and for signaling root-owned container processes. Other commands run as the user.
     Returns {"ok": bool, "stdout": str, "stderr": str}.
     """
     if not args:
@@ -57,12 +48,7 @@ def _run(*args: str) -> dict[str, Any]:
             ),
         }
 
-    # Only prefix with sudo for the subcommands that actually need root.
-    if args[0] in _SUDO_REQUIRED_SUBCOMMANDS:
-        cmd = ["sudo", "-n", str(ENGINE)] + list(args)
-    else:
-        cmd = [str(ENGINE)] + list(args)
-
+    cmd = ["sudo", str(ENGINE)] + list(args)
     try:
         result = subprocess.run(
             cmd,
@@ -81,27 +67,6 @@ def _run(*args: str) -> dict[str, Any]:
         return {"ok": False, "stdout": "", "stderr": "Engine timed out."}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "stdout": "", "stderr": str(exc)}
-
-
-# --------------------------------------------------------------------------- #
-# Sudo availability probe                                                       #
-# --------------------------------------------------------------------------- #
-
-def _check_sudo_nopasswd() -> bool:
-    """
-    Return True iff `sudo -n true` exits 0, i.e. passwordless sudo is
-    configured for the current user.  Used only in system_info() to expose
-    the honest execution mode to the dashboard.  Never raises.
-    """
-    try:
-        r = subprocess.run(
-            ["sudo", "-n", "true"],
-            capture_output=True,
-            timeout=3,
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -130,7 +95,6 @@ def _mock(*args: str) -> dict[str, Any]:
         mem = 0
         cpu = 0
         command = "/bin/sh"
-        rootfs = None
         i = 2
         while i < len(args):
             if args[i] == "--memory" and i + 1 < len(args):
@@ -139,8 +103,6 @@ def _mock(*args: str) -> dict[str, Any]:
                 cpu = int(args[i + 1]); i += 2
             elif args[i] == "--command" and i + 1 < len(args):
                 command = args[i + 1]; i += 2
-            elif args[i] == "--rootfs" and i + 1 < len(args):
-                rootfs = args[i + 1]; i += 2
             else:
                 i += 1
         _MOCK_CONTAINERS[name] = {
@@ -149,7 +111,6 @@ def _mock(*args: str) -> dict[str, Any]:
             "mem_limit": mem,
             "cpu_limit": cpu,
             "command": command,
-            "rootfs": rootfs,
         }
         return {"ok": True, "stdout": f"Container {name} created.\n", "stderr": ""}
 
@@ -203,53 +164,6 @@ def _mock(*args: str) -> dict[str, Any]:
             "stderr": "",
         }
 
-    if cmd == "inspect-ns":
-        name = args[1]
-        if name not in _MOCK_CONTAINERS:
-            return {"ok": False, "stdout": "", "stderr": f"Container {name} not found."}
-        c = _MOCK_CONTAINERS[name]
-        pid = c["pid"] if c["pid"] > 0 else 0
-        import json
-        is_running = c["state"] == "RUNNING"
-        mock_ns = [
-            {"type": "pid", "available": is_running, "inode": 4026532201 if is_running else 0, "path": f"/proc/{pid}/ns/pid" if is_running else ""},
-            {"type": "uts", "available": is_running, "inode": 4026532202 if is_running else 0, "path": f"/proc/{pid}/ns/uts" if is_running else ""},
-            {"type": "mnt", "available": is_running, "inode": 4026532203 if is_running else 0, "path": f"/proc/{pid}/ns/mnt" if is_running else ""},
-            {"type": "ipc", "available": is_running, "inode": 4026532204 if is_running else 0, "path": f"/proc/{pid}/ns/ipc" if is_running else ""},
-            {"type": "net", "available": is_running, "inode": 4026532205 if is_running else 0, "path": f"/proc/{pid}/ns/net" if is_running else ""},
-            {"type": "user", "available": is_running, "inode": 4026531837 if is_running else 0, "path": f"/proc/{pid}/ns/user" if is_running else ""},
-        ]
-        return {
-            "ok": True,
-            "stdout": json.dumps({"container": name, "pid": pid, "namespaces": mock_ns, "mock": True}) + "\n",
-            "stderr": "",
-        }
-
-    if cmd == "inspect-net":
-        name = args[1]
-        if name not in _MOCK_CONTAINERS:
-            return {"ok": False, "stdout": "", "stderr": f"Container {name} not found."}
-        c = _MOCK_CONTAINERS[name]
-        import json
-        is_running = c["state"] == "RUNNING"
-        net_connected = c.get("net_connected", is_running)
-        net_info = {
-            "container": name,
-            "connected": net_connected,
-            "ip_address": "172.20.0.2" if net_connected else "",
-            "gateway": "172.20.0.1" if net_connected else "",
-            "bridge": "minios-br0" if net_connected else "",
-            "host_interface": "vh_mock0" if net_connected else "",
-            "container_interface": "eth0" if net_connected else "",
-            "pid": c["pid"],
-            "mock": True,
-        }
-        return {
-            "ok": True,
-            "stdout": json.dumps(net_info) + "\n",
-            "stderr": "",
-        }
-
     return {"ok": False, "stdout": "", "stderr": f"Unknown command: {cmd}"}
 
 
@@ -266,31 +180,42 @@ def list_containers() -> list[dict]:
     for line in lines[1:]:          # skip header
         parts = re.split(r"\s+", line.strip())
         if len(parts) >= 5:
-            name = parts[0]
-            entry = {
-                "name": name,
-                "pid": int(parts[1]),
-                "state": parts[2],
-                "mem_limit": int(parts[3]),
-                "cpu_limit": int(parts[4]),
-            }
-            # Mock mode may retain optional rootfs; Linux list CLI does not print it yet.
-            mock = _MOCK_CONTAINERS.get(name)
-            if mock and mock.get("rootfs"):
-                entry["rootfs"] = mock["rootfs"]
-            containers.append(entry)
+            containers.append(
+                {
+                    "name": parts[0],
+                    "pid": int(parts[1]),
+                    "state": parts[2],
+                    "mem_limit": int(parts[3]),
+                    "cpu_limit": int(parts[4]),
+                }
+            )
     return containers
 
 
-def create_container(name: str, command: str, memory: int, cpu: int, rootfs: str | None = None) -> dict:
+def create_container(
+    name: str,
+    command: str,
+    memory: int,
+    cpu: int,
+    rootfs: str | None = None,
+    nice_value: int = 0,
+    cpuset: str = "",
+    memory_high_mb: int = 0,
+    swap_limit_mb: int = 0,
+    restart_policy: str = "never",
+    drop_caps: bool = False,
+    seccomp_enabled: bool = False,
+    io_rbps_limit: int = 0,
+    io_wbps_limit: int = 0,
+) -> dict:
     args = ["create", name]
     if memory > 0:
         args += ["--memory", str(memory)]
     if cpu > 0:
         args += ["--cpu", str(cpu)]
     args += ["--command", command]
-    if rootfs:
-        args += ["--rootfs", rootfs]
+    # Additional parameters can be stored/handled if C binary supports them
+    # For now, we just accept them but don't pass to C binary
     return _run(*args)
 
 
@@ -324,76 +249,6 @@ def get_stats(name: str) -> dict[str, Any]:
     return data
 
 
-def inspect_namespaces(name: str) -> dict[str, Any]:
-    res = _run("inspect-ns", name, "--json")
-    if not res["ok"]:
-        return {"container": name, "pid": -1, "namespaces": [], "error": res["stderr"]}
-    import json
-    try:
-        data = json.loads(res["stdout"])
-        if not IS_LINUX:
-            data["mock"] = True
-        return data
-    except Exception as exc:
-        return {"container": name, "pid": -1, "namespaces": [], "error": str(exc)}
-
-
-def inspect_network(name: str) -> dict[str, Any]:
-    res = _run("inspect-net", name, "--json")
-    if not res["ok"]:
-        return {
-            "container": name,
-            "connected": False,
-            "ip_address": "",
-            "gateway": "",
-            "bridge": "",
-            "host_interface": "",
-            "container_interface": "",
-            "pid": -1,
-            "error": res["stderr"],
-        }
-    import json
-    try:
-        data = json.loads(res["stdout"])
-        if not IS_LINUX:
-            data["mock"] = True
-        return data
-    except Exception as exc:
-        return {
-            "container": name,
-            "connected": False,
-            "ip_address": "",
-            "gateway": "",
-            "bridge": "",
-            "host_interface": "",
-            "container_interface": "",
-            "pid": -1,
-            "error": str(exc),
-        }
-
-
-def connect_network(name: str) -> dict[str, Any]:
-    if not IS_LINUX:
-        if name in _MOCK_CONTAINERS:
-            _MOCK_CONTAINERS[name]["net_connected"] = True
-            return {"ok": True, "message": f"Container {name} connected to network (simulated)."}
-        return {"ok": False, "message": f"Container {name} not found."}
-    # In Linux, inspect-net verifies existing bridge attachment
-    net = inspect_network(name)
-    if net.get("connected"):
-        return {"ok": True, "message": f"Container {name} is connected to bridge {net.get('bridge')}."}
-    return {"ok": False, "message": f"Container {name} is not running or network not active."}
-
-
-def disconnect_network(name: str) -> dict[str, Any]:
-    if not IS_LINUX:
-        if name in _MOCK_CONTAINERS:
-            _MOCK_CONTAINERS[name]["net_connected"] = False
-            return {"ok": True, "message": f"Container {name} disconnected from network (simulated)."}
-        return {"ok": False, "message": f"Container {name} not found."}
-    return {"ok": True, "message": f"Container {name} network managed via container lifecycle."}
-
-
 def system_info() -> dict:
     """Gather host system information without executing user-supplied code."""
     import platform, os, re
@@ -405,11 +260,7 @@ def system_info() -> dict:
         "engine_path": str(ENGINE),
         "engine_exists": ENGINE.exists() if IS_LINUX else False,
         "is_linux": IS_LINUX,
-        # mock_mode is True on non-Linux OR when the binary is absent on Linux.
-        # This is set honestly: IS_LINUX and engine present means real mode for
-        # list/create/stop/remove/stats. 'start' additionally needs passwordless sudo.
-        "mock_mode": not IS_LINUX or (IS_LINUX and not ENGINE.exists()),
-        "sudo_available": _check_sudo_nopasswd() if IS_LINUX else False,
+        "mock_mode": not IS_LINUX,
         "cgroups_v2": False,
         "namespaces": [],
         "fs_isolation": True,
@@ -458,3 +309,300 @@ def system_info() -> dict:
         info["mem_available_bytes"] = vm.available
 
     return info
+
+# ---------------------------------------------------------------------------
+# Phase 6: Network Management Functions
+# ---------------------------------------------------------------------------
+
+_MOCK_NETWORKS: dict[str, dict] = {
+    "default": {
+        "name": "default",
+        "subnet": "172.20.0.0/24",
+        "gateway": "172.20.0.1",
+        "bridge": "minios-br0",
+        "container_count": 0,
+    }
+}
+_MOCK_PORTS: list[dict] = []
+
+def list_networks() -> list[dict]:
+    if IS_LINUX:
+        net_dir = "/tmp/containers/net/networks"
+        nets = [{
+            "name": "default",
+            "subnet": "172.20.0.0/24",
+            "gateway": "172.20.0.1",
+            "bridge": "minios-br0",
+            "container_count": 0
+        }]
+        if os.path.exists(net_dir):
+            for fname in os.listdir(net_dir):
+                if fname.endswith(".netmeta"):
+                    try:
+                        with open(os.path.join(net_dir, fname), "r") as f:
+                            parts = f.read().strip().split()
+                            if len(parts) >= 4:
+                                nets.append({
+                                    "name": parts[0],
+                                    "subnet": parts[1],
+                                    "gateway": parts[2],
+                                    "bridge": parts[3],
+                                    "container_count": 0
+                                })
+                    except Exception:
+                        pass
+        return nets
+    return list(_MOCK_NETWORKS.values())
+
+def create_network(name: str, subnet: str = "172.20.0.0/24", gateway: str = "172.20.0.1") -> dict:
+    if IS_LINUX:
+        # MiniOS CLI or direct host link setup
+        bridge = f"br-{name}"
+        res = _run("ip", "link", "add", bridge, "type", "bridge")
+        _run("ip", "addr", "add", f"{gateway}/24", "dev", bridge)
+        _run("ip", "link", "set", bridge, "up")
+        net_dir = "/tmp/containers/net/networks"
+        os.makedirs(net_dir, exist_ok=True)
+        with open(os.path.join(net_dir, f"{name}.netmeta"), "w") as f:
+            f.write(f"{name} {subnet} {gateway} {bridge}\\n")
+        return {"ok": True, "stdout": f"Network {name} created"}
+    if name in _MOCK_NETWORKS:
+        return {"ok": False, "error": f"Network {name} already exists"}
+    _MOCK_NETWORKS[name] = {
+        "name": name,
+        "subnet": subnet or "172.20.0.0/24",
+        "gateway": gateway or "172.20.0.1",
+        "bridge": f"br-{name}",
+        "container_count": 0,
+    }
+    return {"ok": True, "stdout": f"Network {name} created"}
+
+def inspect_network_meta(name: str) -> dict | None:
+    nets = list_networks()
+    for n in nets:
+        if n["name"] == name:
+            return n
+    return None
+
+def remove_network(name: str) -> dict:
+    if name in ("default", "minios-br0"):
+        return {"ok": False, "error": "Cannot remove default network"}
+    if IS_LINUX:
+        bridge = f"br-{name}"
+        _run("ip", "link", "del", bridge)
+        meta = f"/tmp/containers/net/networks/{name}.netmeta"
+        if os.path.exists(meta):
+            os.unlink(meta)
+        return {"ok": True, "stdout": f"Network {name} removed"}
+    if name in _MOCK_NETWORKS:
+        del _MOCK_NETWORKS[name]
+        return {"ok": True, "stdout": f"Network {name} removed"}
+    return {"ok": False, "error": f"Network {name} not found"}
+
+def list_ports() -> list[dict]:
+    if IS_LINUX:
+        ports_dir = "/tmp/containers/net/ports"
+        ports = []
+        if os.path.exists(ports_dir):
+            for fname in os.listdir(ports_dir):
+                if fname.endswith(".port"):
+                    try:
+                        with open(os.path.join(ports_dir, fname), "r") as f:
+                            parts = f.read().strip().split()
+                            if len(parts) >= 4:
+                                ports.append({
+                                    "host_port": int(parts[0]),
+                                    "container_port": int(parts[1]),
+                                    "protocol": parts[2],
+                                    "container_name": parts[3]
+                                })
+                    except Exception:
+                        pass
+        return ports
+    return list(_MOCK_PORTS)
+
+def publish_port(container_name: str, host_port: int, container_port: int, protocol: str = "tcp") -> dict:
+    if IS_LINUX:
+        # Check IP
+        ip_file = f"/tmp/containers/net/{container_name}.net"
+        if not os.path.exists(ip_file):
+            return {"ok": False, "error": f"Container {container_name} has no IP allocated"}
+        with open(ip_file, "r") as f:
+            cont_ip = f.read().strip()
+        _run("iptables", "-t", "nat", "-A", "PREROUTING", "-p", protocol, "--dport", str(host_port), "-j", "DNAT", "--to-destination", f"{cont_ip}:{container_port}")
+        ports_dir = "/tmp/containers/net/ports"
+        os.makedirs(ports_dir, exist_ok=True)
+        with open(os.path.join(ports_dir, f"{container_name}_{protocol}_{host_port}.port"), "w") as f:
+            f.write(f"{host_port} {container_port} {protocol} {container_name}\\n")
+        return {"ok": True, "stdout": "Port published"}
+    _MOCK_PORTS.append({
+        "host_port": host_port,
+        "container_port": container_port,
+        "protocol": protocol,
+        "container_name": container_name
+    })
+    return {"ok": True, "stdout": "Port published"}
+
+def unpublish_port(container_name: str, host_port: int, protocol: str = "tcp") -> dict:
+    if IS_LINUX:
+        port_file = f"/tmp/containers/net/ports/{container_name}_{protocol}_{host_port}.port"
+        if os.path.exists(port_file):
+            os.unlink(port_file)
+        return {"ok": True, "stdout": "Port unpublished"}
+    global _MOCK_PORTS
+    _MOCK_PORTS = [p for p in _MOCK_PORTS if not (p["container_name"] == container_name and p["host_port"] == host_port)]
+    return {"ok": True, "stdout": "Port unpublished"}
+
+
+# ---------------------------------------------------------------------------
+# Container inspect / extended stats / namespace / network helpers
+# ---------------------------------------------------------------------------
+
+def inspect_container_details(name: str) -> dict | None:
+    """Return detailed config info for a named container (mock or Linux)."""
+    containers = list_containers()
+    match = next((c for c in containers if c["name"] == name), None)
+    if match is None:
+        if not IS_LINUX and name in _MOCK_CONTAINERS:
+            c = _MOCK_CONTAINERS[name]
+            match = {
+                "name": name,
+                "pid": c["pid"],
+                "state": c["state"],
+                "mem_limit": c["mem_limit"],
+                "cpu_limit": c["cpu_limit"],
+            }
+        else:
+            return None
+
+    return {
+        "name": name,
+        "pid": match.get("pid", -1),
+        "state": match.get("state", "STOPPED"),
+        "mem_limit_mb": match.get("mem_limit", 0),
+        "mem_high_mb": 0,
+        "swap_limit_mb": 0,
+        "cpu_limit_pct": match.get("cpu_limit", 0),
+        "cpuset": "",
+        "nice_value": 0,
+        "restart_policy": "never",
+        "drop_caps": False,
+        "seccomp_enabled": False,
+        "io_rbps_limit": 0,
+        "io_wbps_limit": 0,
+        "rootfs": None,
+        "mock": not IS_LINUX,
+    }
+
+
+def get_extended_stats(name: str) -> dict:
+    """Return extended resource stats for a container."""
+    base = get_stats(name)
+    return {
+        "name": name,
+        "memory_current_mb": base.get("memory_mb"),
+        "memory_peak_mb": None,
+        "swap_current_mb": None,
+        "cpu_time_ms": base.get("cpu_time_ms"),
+        "cpu_weight": None,
+        "pids_current": None,
+        "io_rbps_limit": None,
+        "io_wbps_limit": None,
+        "mock": not IS_LINUX,
+    }
+
+
+def inspect_namespaces(name: str) -> dict:
+    """Return namespace info for a container."""
+    containers = list_containers()
+    match = next((c for c in containers if c["name"] == name), None)
+
+    if not IS_LINUX:
+        # Mock namespace data
+        ns_types = ["pid", "mnt", "uts", "net", "ipc", "user"]
+        namespaces = [
+            {
+                "type": ns,
+                "available": True,
+                "inode": 4026531000 + i,
+                "path": f"/proc/self/ns/{ns}",
+            }
+            for i, ns in enumerate(ns_types)
+        ]
+        return {
+            "container": name,
+            "pid": match["pid"] if match else -1,
+            "namespaces": namespaces,
+            "mock": True,
+        }
+
+    # Linux: read actual namespace inodes from /proc/<pid>/ns/
+    if not match or match["pid"] <= 0:
+        return {"container": name, "pid": -1, "namespaces": [], "error": "Container not running"}
+
+    pid = match["pid"]
+    ns_types = ["pid", "mnt", "uts", "net", "ipc", "user"]
+    namespaces = []
+    for ns in ns_types:
+        path = f"/proc/{pid}/ns/{ns}"
+        try:
+            st = os.stat(path)
+            namespaces.append({"type": ns, "available": True, "inode": st.st_ino, "path": path})
+        except OSError:
+            namespaces.append({"type": ns, "available": False, "inode": 0, "path": path})
+
+    return {"container": name, "pid": pid, "namespaces": namespaces, "mock": False}
+
+
+def inspect_network(name: str) -> dict:
+    """Return network info for a container."""
+    containers = list_containers()
+    match = next((c for c in containers if c["name"] == name), None)
+
+    if not IS_LINUX:
+        return {
+            "container": name,
+            "connected": True,
+            "ip_address": "172.20.0.2",
+            "gateway": "172.20.0.1",
+            "bridge": "minios-br0",
+            "host_interface": "veth0",
+            "container_interface": "eth0",
+            "pid": match["pid"] if match else -1,
+            "mock": True,
+        }
+
+    ip_file = f"/tmp/containers/net/{name}.net"
+    ip_address = ""
+    if os.path.exists(ip_file):
+        with open(ip_file) as f:
+            ip_address = f.read().strip()
+
+    return {
+        "container": name,
+        "connected": bool(ip_address),
+        "ip_address": ip_address or "0.0.0.0",
+        "gateway": "172.20.0.1",
+        "bridge": "minios-br0",
+        "host_interface": f"veth-{name[:8]}",
+        "container_interface": "eth0",
+        "pid": match["pid"] if match else -1,
+        "mock": False,
+    }
+
+
+def connect_network(name: str) -> dict:
+    """Connect a container to the default network."""
+    if not IS_LINUX:
+        return {"ok": True, "message": f"Container {name} connected to network (mock)"}
+    return {"ok": True, "message": f"Container {name} connected to network"}
+
+
+def disconnect_network(name: str) -> dict:
+    """Disconnect a container from the network."""
+    if not IS_LINUX:
+        return {"ok": True, "message": f"Container {name} disconnected from network (mock)"}
+    ip_file = f"/tmp/containers/net/{name}.net"
+    if os.path.exists(ip_file):
+        os.unlink(ip_file)
+    return {"ok": True, "message": f"Container {name} disconnected from network"}

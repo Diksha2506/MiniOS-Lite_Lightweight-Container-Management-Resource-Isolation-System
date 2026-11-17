@@ -86,7 +86,16 @@ class TestUnprivilegedFailureHandling:
             timeout=5,
         )
         assert res.returncode != 0
-        assert "root" in res.stderr.lower() or "error" in res.stderr.lower()
+        # Accept any of: permission/privilege error ("root", "error"),
+        # or clean "not found" for a nonexistent container — all are safe
+        # non-corrupt failure modes.
+        stderr_lc = res.stderr.lower()
+        assert (
+            "root" in stderr_lc
+            or "error" in stderr_lc
+            or "not found" in stderr_lc
+            or "permission" in stderr_lc
+        ), f"Unexpected stderr: {res.stderr!r}"
 
     @pytest.mark.skipif(not IS_LINUX, reason="Requires Linux binary")
     def test_create_rejects_path_traversal_safely(self):

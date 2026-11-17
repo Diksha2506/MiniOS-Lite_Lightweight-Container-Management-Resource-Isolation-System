@@ -193,6 +193,68 @@ int cgroup_set_memory_limit(const char *container_name, long limit_mb) {
     return write_to_cgroup_file(path, value);
 }
 
+int cgroup_set_memory_high(const char *container_name, long limit_mb) {
+    char dir[PATH_MAX];
+    char path[PATH_MAX];
+    char value[64];
+
+    if (container_cgroup_dir(container_name, dir, sizeof(dir)) != 0) {
+        return -1;
+    }
+    if (snprintf(path, sizeof(path), "%s/memory.high", dir) >= (int)sizeof(path)) {
+        return -1;
+    }
+    if (access(path, W_OK) != 0) {
+        return 0; /* Optional in some setups */
+    }
+    if (limit_mb <= 0) {
+        snprintf(value, sizeof(value), "max");
+    } else {
+        snprintf(value, sizeof(value), "%lld", (long long)limit_mb * 1024LL * 1024LL);
+    }
+    return write_to_cgroup_file(path, value);
+}
+
+int cgroup_set_swap_limit(const char *container_name, long limit_mb) {
+    char dir[PATH_MAX];
+    char path[PATH_MAX];
+    char value[64];
+
+    if (container_cgroup_dir(container_name, dir, sizeof(dir)) != 0) {
+        return -1;
+    }
+    if (snprintf(path, sizeof(path), "%s/memory.swap.max", dir) >= (int)sizeof(path)) {
+        return -1;
+    }
+    if (access(path, W_OK) != 0) {
+        return 0; /* Swap controller might not be enabled or supported */
+    }
+    if (limit_mb < 0) {
+        snprintf(value, sizeof(value), "max");
+    } else {
+        snprintf(value, sizeof(value), "%lld", (long long)limit_mb * 1024LL * 1024LL);
+    }
+    return write_to_cgroup_file(path, value);
+}
+
+int cgroup_set_oom_group(const char *container_name, int enable) {
+    char dir[PATH_MAX];
+    char path[PATH_MAX];
+    char value[16];
+
+    if (container_cgroup_dir(container_name, dir, sizeof(dir)) != 0) {
+        return -1;
+    }
+    if (snprintf(path, sizeof(path), "%s/memory.oom.group", dir) >= (int)sizeof(path)) {
+        return -1;
+    }
+    if (access(path, W_OK) != 0) {
+        return 0;
+    }
+    snprintf(value, sizeof(value), "%d", enable ? 1 : 0);
+    return write_to_cgroup_file(path, value);
+}
+
 int cgroup_set_cpu_limit(const char *container_name, int limit_pct) {
     char dir[PATH_MAX];
     char path[PATH_MAX];
@@ -211,6 +273,72 @@ int cgroup_set_cpu_limit(const char *container_name, int limit_pct) {
     /* cpu.max = QUOTA PERIOD; PERIOD=100000us; quota = pct * 1000 */
     long quota = (long)limit_pct * 1000L;
     snprintf(value, sizeof(value), "%ld 100000", quota);
+    return write_to_cgroup_file(path, value);
+}
+
+int cgroup_set_cpu_weight(const char *container_name, int weight) {
+    char dir[PATH_MAX];
+    char path[PATH_MAX];
+    char value[32];
+
+    if (container_cgroup_dir(container_name, dir, sizeof(dir)) != 0) {
+        return -1;
+    }
+    if (snprintf(path, sizeof(path), "%s/cpu.weight", dir) >= (int)sizeof(path)) {
+        return -1;
+    }
+    if (access(path, W_OK) != 0) {
+        return 0;
+    }
+    if (weight < 1) weight = 1;
+    if (weight > 10000) weight = 10000;
+    snprintf(value, sizeof(value), "%d", weight);
+    return write_to_cgroup_file(path, value);
+}
+
+int cgroup_set_cpuset(const char *container_name, const char *cpus) {
+    char dir[PATH_MAX];
+    char path[PATH_MAX];
+
+    if (!cpus || cpus[0] == '\0') {
+        return 0;
+    }
+    if (container_cgroup_dir(container_name, dir, sizeof(dir)) != 0) {
+        return -1;
+    }
+    if (snprintf(path, sizeof(path), "%s/cpuset.cpus", dir) >= (int)sizeof(path)) {
+        return -1;
+    }
+    if (access(path, W_OK) != 0) {
+        return 0;
+    }
+    return write_to_cgroup_file(path, cpus);
+}
+
+int cgroup_set_io_max(const char *container_name, int major, int minor, long rbps, long wbps) {
+    char dir[PATH_MAX];
+    char path[PATH_MAX];
+    char value[128];
+
+    if (container_cgroup_dir(container_name, dir, sizeof(dir)) != 0) {
+        return -1;
+    }
+    if (snprintf(path, sizeof(path), "%s/io.max", dir) >= (int)sizeof(path)) {
+        return -1;
+    }
+    if (access(path, W_OK) != 0) {
+        return 0;
+    }
+
+    if (rbps > 0 && wbps > 0) {
+        snprintf(value, sizeof(value), "%d:%d rbps=%ld wbps=%ld", major, minor, rbps, wbps);
+    } else if (rbps > 0) {
+        snprintf(value, sizeof(value), "%d:%d rbps=%ld", major, minor, rbps);
+    } else if (wbps > 0) {
+        snprintf(value, sizeof(value), "%d:%d wbps=%ld", major, minor, wbps);
+    } else {
+        return 0;
+    }
     return write_to_cgroup_file(path, value);
 }
 

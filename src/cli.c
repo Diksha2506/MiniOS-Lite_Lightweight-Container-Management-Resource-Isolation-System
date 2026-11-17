@@ -14,31 +14,49 @@ int parse_and_execute(int argc, char **argv) {
         if (argc < 3) {
             fprintf(stderr,
                     "Usage: %s create <name> [--memory <MB>] [--cpu <pct>] "
-                    "[--command <cmd>] [--rootfs <path>]\n",
+                    "[--command <cmd>] [--rootfs <path>] [--nice <val>] [--cpuset <list>] "
+                    "[--swap <MB>] [--memory-high <MB>] [--restart <never|on-failure|always>] "
+                    "[--drop-caps] [--seccomp]\n",
                     argv[0]);
             return 1;
         }
-        const char *name = argv[2];
-        long mem_limit = 0;
-        int cpu_limit = 0;
-        const char *command = "/bin/sh";
-        const char *rootfs = NULL;
+        container_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        strncpy(cfg.name, argv[2], MAX_CONTAINER_NAME - 1);
+        strncpy(cfg.command, "/bin/sh", MAX_COMMAND_LEN - 1);
 
         for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "--memory") == 0 && i + 1 < argc) {
-                mem_limit = strtol(argv[++i], NULL, 10);
+                cfg.memory_limit_mb = strtol(argv[++i], NULL, 10);
             } else if (strcmp(argv[i], "--cpu") == 0 && i + 1 < argc) {
-                cpu_limit = atoi(argv[++i]);
+                cfg.cpu_limit_pct = atoi(argv[++i]);
             } else if (strcmp(argv[i], "--command") == 0 && i + 1 < argc) {
-                command = argv[++i];
+                strncpy(cfg.command, argv[++i], MAX_COMMAND_LEN - 1);
             } else if (strcmp(argv[i], "--rootfs") == 0 && i + 1 < argc) {
-                rootfs = argv[++i];
+                strncpy(cfg.rootfs, argv[++i], MAX_ROOTFS_LEN - 1);
+            } else if (strcmp(argv[i], "--nice") == 0 && i + 1 < argc) {
+                cfg.nice_value = atoi(argv[++i]);
+            } else if (strcmp(argv[i], "--cpuset") == 0 && i + 1 < argc) {
+                strncpy(cfg.cpuset, argv[++i], sizeof(cfg.cpuset) - 1);
+            } else if (strcmp(argv[i], "--swap") == 0 && i + 1 < argc) {
+                cfg.swap_limit_mb = strtol(argv[++i], NULL, 10);
+            } else if (strcmp(argv[i], "--memory-high") == 0 && i + 1 < argc) {
+                cfg.memory_high_mb = strtol(argv[++i], NULL, 10);
+            } else if (strcmp(argv[i], "--restart") == 0 && i + 1 < argc) {
+                const char *p = argv[++i];
+                if (strcmp(p, "always") == 0) cfg.restart_policy = RESTART_ALWAYS;
+                else if (strcmp(p, "on-failure") == 0) cfg.restart_policy = RESTART_ON_FAILURE;
+                else cfg.restart_policy = RESTART_NEVER;
+            } else if (strcmp(argv[i], "--drop-caps") == 0) {
+                cfg.drop_caps = true;
+            } else if (strcmp(argv[i], "--seccomp") == 0) {
+                cfg.seccomp_enabled = true;
             } else {
                 fprintf(stderr, "Unknown create option: %s\n", argv[i]);
                 return 1;
             }
         }
-        return container_create(name, command, mem_limit, cpu_limit, rootfs);
+        return container_create_extended(&cfg);
     } else if (strcmp(cmd, "start") == 0) {
         if (argc < 3) {
             fprintf(stderr, "Usage: %s start <name>\n", argv[0]);

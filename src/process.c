@@ -10,12 +10,14 @@
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include "process.h"
 #include "namespace.h"
 #include "cgroup.h"
 #include "network.h"
+#include "security.h"
 #include "paths.h"
 
 #define STACK_SIZE (1024 * 1024)
@@ -138,6 +140,19 @@ static int child_process(void *arg) {
     if (namespace_setup(args->c.name, rootfs) != 0) {
         fprintf(stderr, "Namespace setup failed\n");
         _exit(1);
+    }
+
+    /* Apply niceness */
+    if (args->c.nice_value != 0) {
+        setpriority(PRIO_PROCESS, 0, args->c.nice_value);
+    }
+
+    /* Apply security protections */
+    if (args->c.drop_caps) {
+        security_drop_capabilities();
+    }
+    if (args->c.seccomp_enabled) {
+        security_apply_seccomp();
     }
 
     char cmd_buf[MAX_COMMAND_LEN];

@@ -10,10 +10,14 @@ from ..services.engine import (
     inspect_network,
     connect_network,
     disconnect_network,
+    inspect_container_details,
+    get_extended_stats,
 )
 from ..schemas.models import (
     CreateContainerRequest,
     ContainerResponse,
+    ContainerInspectResponse,
+    PhaseStatsResponse,
     StatsResponse,
     ApiResponse,
     NamespaceInspectResponse,
@@ -30,10 +34,81 @@ def api_list():
 
 @router.post("", response_model=ApiResponse)
 def api_create(body: CreateContainerRequest):
-    res = create_container(body.name, body.command, body.memory_mb, body.cpu_pct, body.rootfs)
+    res = create_container(
+        name=body.name,
+        command=body.command,
+        memory=body.memory_mb,
+        cpu=body.cpu_pct,
+        rootfs=body.rootfs,
+        nice_value=body.nice_value,
+        cpuset=body.cpuset,
+        memory_high_mb=body.memory_high_mb,
+        swap_limit_mb=body.swap_limit_mb,
+        restart_policy=body.restart_policy,
+        drop_caps=body.drop_caps,
+        seccomp_enabled=body.seccomp_enabled,
+        io_rbps_limit=body.io_rbps_limit,
+        io_wbps_limit=body.io_wbps_limit,
+    )
     if not res["ok"]:
         raise HTTPException(status_code=400, detail=res["stderr"] or res["stdout"])
     return ApiResponse(ok=True, message=res["stdout"].strip())
+
+
+@router.get("/{name}/inspect", response_model=ContainerInspectResponse)
+def api_inspect(name: str):
+    details = inspect_container_details(name)
+    if not details:
+        raise HTTPException(status_code=404, detail=f"Container '{name}' not found.")
+    return ContainerInspectResponse(**details)
+
+
+@router.get("/{name}/extended-stats", response_model=PhaseStatsResponse)
+def api_extended_stats(name: str):
+    containers = list_containers()
+    exists = any(c["name"] == name for c in containers)
+    if not exists and not inspect_container_details(name):
+        raise HTTPException(status_code=404, detail=f"Container '{name}' not found.")
+    data = get_extended_stats(name)
+    return PhaseStatsResponse(**data)
+
+
+@router.get("/{name}/namespaces", response_model=NamespaceInspectResponse)
+def api_namespaces(name: str):
+    data = inspect_namespaces(name)
+    if "error" in data and not data.get("namespaces"):
+        raise HTTPException(status_code=400, detail=data["error"])
+    return NamespaceInspectResponse(**data)
+
+
+@router.get("/{name}/network", response_model=NetworkInspectResponse)
+def api_network(name: str):
+    data = inspect_network(name)
+    if "error" in data and not data.get("ip_address") and not data.get("mock"):
+        raise HTTPException(status_code=400, detail=data["error"])
+    return NetworkInspectResponse(**data)
+
+
+@router.post("/{name}/connect-network", response_model=ApiResponse)
+def api_connect_network(name: str):
+    res = connect_network(name)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("message", "Failed to connect network"))
+    return ApiResponse(ok=True, message=res["message"])
+
+
+@router.delete("/{name}/network", response_model=ApiResponse)
+def api_disconnect_network(name: str):
+    res = disconnect_network(name)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("message", "Failed to disconnect network"))
+    return ApiResponse(ok=True, message=res["message"])
+
+
+@router.get("/{name}/stats", response_model=StatsResponse)
+def api_stats(name: str):
+    data = get_stats(name)
+    return StatsResponse(name=name, **data)
 
 
 @router.get("/{name}", response_model=ContainerResponse)
@@ -67,44 +142,6 @@ def api_remove(name: str):
     if not res["ok"]:
         raise HTTPException(status_code=400, detail=res["stderr"] or res["stdout"])
     return ApiResponse(ok=True, message=res["stdout"].strip())
-
-
-@router.get("/{name}/stats", response_model=StatsResponse)
-def api_stats(name: str):
-    data = get_stats(name)
-    return StatsResponse(name=name, **data)
-
-
-@router.get("/{name}/namespaces", response_model=NamespaceInspectResponse)
-def api_namespaces(name: str):
-    data = inspect_namespaces(name)
-    if "error" in data and not data.get("namespaces"):
-        raise HTTPException(status_code=400, detail=data["error"])
-    return NamespaceInspectResponse(**data)
-
-
-@router.get("/{name}/network", response_model=NetworkInspectResponse)
-def api_network(name: str):
-    data = inspect_network(name)
-    if "error" in data and not data.get("ip_address") and not data.get("mock"):
-        raise HTTPException(status_code=400, detail=data["error"])
-    return NetworkInspectResponse(**data)
-
-
-@router.post("/{name}/connect-network", response_model=ApiResponse)
-def api_connect_network(name: str):
-    res = connect_network(name)
-    if not res.get("ok"):
-        raise HTTPException(status_code=400, detail=res.get("message", "Failed to connect network"))
-    return ApiResponse(ok=True, message=res["message"])
-
-
-@router.delete("/{name}/network", response_model=ApiResponse)
-def api_disconnect_network(name: str):
-    res = disconnect_network(name)
-    if not res.get("ok"):
-        raise HTTPException(status_code=400, detail=res.get("message", "Failed to disconnect network"))
-    return ApiResponse(ok=True, message=res["message"])
 
 
 import asyncio

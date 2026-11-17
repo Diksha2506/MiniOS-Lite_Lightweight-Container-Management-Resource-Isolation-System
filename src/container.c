@@ -163,6 +163,39 @@ int container_create(const char *name, const char *command, long memory_limit,
     return 0;
 }
 
+int container_create_extended(const container_t *cfg) {
+    if (!cfg || !is_valid_container_name(cfg->name)) {
+        fprintf(stderr, "Error: Invalid container name.\n");
+        return 1;
+    }
+    if (cfg->command[0] == '\0') {
+        fprintf(stderr, "Error: command must not be empty.\n");
+        return 1;
+    }
+
+    container_t existing;
+    if (load_container(cfg->name, &existing) == 0) {
+        fprintf(stderr, "Container %s already exists.\n", cfg->name);
+        return 1;
+    }
+
+    container_t c = *cfg;
+    if (c.rootfs[0] != '\0') {
+        if (rootfs_validate(c.rootfs) != 0) {
+            return 1;
+        }
+    }
+    c.pid = -1;
+    c.state = STATE_STOPPED;
+
+    if (save_container(&c) != 0) {
+        perror("save_container");
+        return 1;
+    }
+    printf("Container %s created.\n", c.name);
+    return 0;
+}
+
 int container_start(const char *name) {
     if (!is_valid_container_name(name)) {
         fprintf(stderr, "Error: Invalid container name '%s'\n", name ? name : "(null)");
@@ -202,10 +235,26 @@ int container_start(const char *name) {
         return 1;
     }
 
+    if (c.memory_high_mb > 0) {
+        cgroup_set_memory_high(c.name, c.memory_high_mb);
+    }
+
+    if (c.swap_limit_mb != 0) {
+        cgroup_set_swap_limit(c.name, c.swap_limit_mb);
+    }
+
     if (c.cpu_limit_pct > 0 && cgroup_set_cpu_limit(c.name, c.cpu_limit_pct) != 0) {
         fprintf(stderr, "Failed to set CPU limit.\n");
         cgroup_remove(c.name);
         return 1;
+    }
+
+    if (c.cpuset[0] != '\0') {
+        cgroup_set_cpuset(c.name, c.cpuset);
+    }
+
+    if (c.io_rbps_limit > 0 || c.io_wbps_limit > 0) {
+        cgroup_set_io_max(c.name, 8, 0, c.io_rbps_limit, c.io_wbps_limit);
     }
 
     pid_t pid = process_start_isolated(&c);
@@ -220,6 +269,8 @@ int container_start(const char *name) {
     if (save_container(&c) != 0) {
         fprintf(stderr, "Warning: container started but metadata save failed.\n");
     }
+
+    supervisor_register(name, pid, c.restart_policy);
     printf("Container %s started with PID %d.\n", name, pid);
     return 0;
 }
@@ -241,12 +292,7 @@ int container_stop(const char *name) {
     }
 
     if (c.pid > 0) {
-        if (kill(c.pid, SIGKILL) != 0 && errno != ESRCH) {
-            fprintf(stderr, "Error: failed to signal PID %d: %s\n", c.pid, strerror(errno));
-            return 1;
-        }
-        waitpid(c.pid, NULL, 0);
-        process_release_pid(c.pid);
+        supervisor_stop_graceful(name, 2);
     }
 
     c.state = STATE_STOPPED;

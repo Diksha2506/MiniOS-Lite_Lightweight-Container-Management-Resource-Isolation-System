@@ -1,10 +1,10 @@
-﻿"""
+"""
 conftest.py — shared pytest fixtures for MiniOS backend tests.
 
 Key guarantee: every test runs with an empty mock-container store so that
 no test leaks state into another.  The real C engine and sudo are NEVER
-called because the mock path is taken whenever IS_LINUX is False
-(Windows) OR when the engine binary does not exist.
+called — IS_LINUX is patched to False for every test so _run() always
+delegates to _mock() regardless of host OS (Linux/WSL2 or Windows).
 """
 import pytest
 from fastapi.testclient import TestClient
@@ -16,12 +16,19 @@ from app.main import app
 @pytest.fixture(autouse=True)
 def reset_mock_store():
     """
-    Clear _MOCK_CONTAINERS before *and* after every test.
+    Force mock mode and clear _MOCK_CONTAINERS before *and* after every test.
+
+    - Patches IS_LINUX to False so _run() always takes the mock path,
+      even when running inside WSL2 / native Linux.
+    - Clears _MOCK_CONTAINERS so no state leaks between tests.
     autouse=True means this runs for every test in the suite automatically.
     """
+    _orig_is_linux = engine_module.IS_LINUX
+    engine_module.IS_LINUX = False          # force mock path on any OS
     engine_module._MOCK_CONTAINERS.clear()
     yield
     engine_module._MOCK_CONTAINERS.clear()
+    engine_module.IS_LINUX = _orig_is_linux  # restore after test
 
 
 @pytest.fixture()
